@@ -149,6 +149,10 @@ struct linenoiseState {
     size_t cols;        /* Number of columns in terminal. */
     size_t maxrows;     /* Maximum num of rows used so far (multiline mode) */
     int history_index;  /* The history index we are currently editing. */
+    char search;        /* search history, 1 forward, -1 reverse. */
+    char sbuf[32];
+    int sstep;
+    const char *oprompt;
 };
 
 enum KEY_ACTION{
@@ -166,6 +170,8 @@ enum KEY_ACTION{
 	ENTER = 13,         /* Enter */
 	CTRL_N = 14,        /* Ctrl-n */
 	CTRL_P = 16,        /* Ctrl-p */
+	CTRL_R = 18,        /* Ctrl-r */
+	CTRL_S = 19,        /* Ctrl-s */
 	CTRL_T = 20,        /* Ctrl-t */
 	CTRL_U = 21,        /* Ctrl+u */
 	CTRL_W = 23,        /* Ctrl+w */
@@ -883,6 +889,76 @@ void linenoiseEditDeletePrevWord(struct linenoiseState *l) {
     refreshLine(l);
 }
 
+/* ========================== History search ============================= */
+
+#define SPROMPT "(i-search)"
+
+static int linenoiseHistorySearch(struct linenoiseState *l, char *str) {
+    int i,j;
+
+    if (str == NULL)
+	return -1;
+
+    i = l->sstep > 0 ? l->sstep : 0;
+    for (; i < history_len; i++) {
+        j = l->search > 0 ? i : history_len - 1 - i;
+        if (strstr(history[j], str) != NULL) {
+            l->sstep = i;
+            return j;
+        }
+    }
+    return -1;
+}
+
+static void linenoiseSearchShow(struct linenoiseState *l) {
+    char sprompt[256];
+
+    sprintf(sprompt, "%s'%s': ", SPROMPT, l->sbuf ? l->sbuf : "");
+    l->prompt = sprompt;
+    refreshLine(l);
+}
+
+static void linenoiseSearchQuit(struct linenoiseState *l) {
+    l->prompt = l->oprompt;
+    l->search = 0;
+    l->sstep = 0;
+    l->sbuf[0] = '\0';
+    refreshLine(l);
+}
+
+static void linenoiseSearchAdd(struct linenoiseState *l, const char *cbuf, int clen) {
+    char tbuf[32];
+    size_t tlen;
+    int tpos = -1;
+    int slen = strlen(l->sbuf);
+
+    if (clen<0) {  /* DEL */
+        int chlen = prevCharLen(l->sbuf, slen, slen, NULL);
+        slen -= chlen;
+        l->sbuf[slen] = '\0';
+        clen = 0;
+    }
+ 
+    tlen = slen + clen;
+    if (tlen > 0) {
+        if (tlen > sizeof(tbuf))            /* overflow, eat the char */
+            return;
+        memcpy(tbuf, l->sbuf, slen);        /* copy sbuf to tbuf */
+        memcpy(&tbuf[slen],cbuf,clen);
+        tbuf[tlen] = '\0';
+
+        if ((tpos = linenoiseHistorySearch(l, tbuf)) != -1) {
+            strcpy(l->sbuf, tbuf);          /* succ, copy tbuf to sbuf */
+            strcpy(l->buf, history[tpos]);  /* copy history to buf */
+            l->len = strlen(l->buf);
+            l->pos = strstr(l->buf, tbuf) - l->buf; /* move to match */
+        } else {
+            linenoiseBeep();
+        }
+    }
+    linenoiseSearchShow(l);
+}
+
 /* This function is the core of the line editing capability of linenoise.
  * It expects 'fd' to be already in "raw mode" so that every key pressed
  * will be returned ASAP to read().
@@ -901,13 +977,17 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
     l.ofd = stdout_fd;
     l.buf = buf;
     l.buflen = buflen;
-    l.prompt = prompt;
+    l.prompt = l.oprompt = prompt;
     l.plen = strlen(prompt);
     l.oldcolpos = l.pos = 0;
     l.len = 0;
     l.cols = getColumns(stdin_fd, stdout_fd);
     l.maxrows = 0;
     l.history_index = 0;
+
+    l.search = 0;
+    l.sstep = 0;
+    l.sbuf[0] = '\0';
 
     /* Buffer starts empty. */
     l.buf[0] = '\0';
@@ -936,6 +1016,37 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             if (c < 0) return l.len;
             /* Read next character when 0 */
             if (c == 0) continue;
+        }
+
+	/* keep searching */
+        if (l.search) {
+            if (!iscntrl(c)) {
+                linenoiseSearchAdd(&l,cbuf,nread);
+                continue;
+            }
+            switch(c) {
+            case CTRL_N:
+            case CTRL_P:
+                linenoiseSearchQuit(&l);
+                continue;
+            case CTRL_R:
+                l.search = -1;
+                l.sstep -= 1;
+                linenoiseSearchAdd(&l,NULL,0);
+                continue;
+            case CTRL_S:
+                l.search = 1;
+                l.sstep += 1;
+                linenoiseSearchAdd(&l,NULL,0);
+                continue;
+            case BACKSPACE:
+            case CTRL_H:
+                linenoiseSearchAdd(&l,NULL,-1);
+                continue;
+            default:
+                linenoiseSearchQuit(&l);
+                break;  /* handle control char */
+            }
         }
 
         switch(c) {
@@ -1052,6 +1163,16 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             buf[0] = '\0';
             l.pos = l.len = 0;
             refreshLine(&l);
+            break;
+        case CTRL_R: /* Ctrl+r, reverse search the history */
+            l.search = -1;
+            l.sbuf[0] = '\0';
+            linenoiseSearchShow(&l);
+            break;
+        case CTRL_S: /* Ctrl+s, forward search the history */
+            l.search = 1;
+            l.sbuf[0] = '\0';
+            linenoiseSearchShow(&l);
             break;
         case CTRL_K: /* Ctrl+k, delete from current to end of line. */
             buf[l.pos] = '\0';

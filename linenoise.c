@@ -933,18 +933,27 @@ static void linenoiseEditDeleteNextWord(struct linenoiseState *l) {
 
 #define SPROMPT "(i-search)"
 
-static int linenoiseHistorySearch(struct linenoiseState *l, char *str) {
-    int i,j;
+static int linenoiseHistorySearch(struct linenoiseState *l, char *str, int next) {
+    int i;
 
     if (str == NULL)
 	return -1;
 
-    i = l->sstep > 0 ? l->sstep : 0;
-    for (; i < history_len; i++) {
-        j = l->search > 0 ? i : history_len - 1 - i;
-        if (strstr(history[j], str) != NULL) {
-            l->sstep = i;
-            return j;
+    if (l->search > 0) {
+        if (l->sstep < 0) l->sstep = 0;
+        for (i = l->sstep + next; i < history_len; i++) {
+            if (strstr(history[i], str) != NULL) {
+                l->sstep = i;
+                return i;
+            }
+        }
+    } else {
+        if (l->sstep < 0) l->sstep = history_len - 1;
+        for (i = l->sstep - next; i >= 0; i--) {
+            if (strstr(history[i], str) != NULL) {
+                l->sstep = i;
+                return i;
+            }
         }
     }
     return -1;
@@ -961,33 +970,35 @@ static void linenoiseSearchShow(struct linenoiseState *l) {
 static void linenoiseSearchQuit(struct linenoiseState *l) {
     l->prompt = l->oprompt;
     l->search = 0;
-    l->sstep = 0;
+    l->sstep = -1;
     l->sbuf[0] = '\0';
     refreshLine(l);
 }
 
 static void linenoiseSearchAdd(struct linenoiseState *l, const char *cbuf, int clen) {
     char tbuf[32];
-    size_t tlen;
+    size_t tlen = 0;
     int tpos = -1;
     int slen = strlen(l->sbuf);
+    int next = 0;
 
     if (clen<0) {  /* DEL */
         int chlen = prevCharLen(l->sbuf, slen, slen, NULL);
         slen -= chlen;
         l->sbuf[slen] = '\0';
-        clen = 0;
+        strcpy(tbuf, l->sbuf);
+        tlen = slen;
+    } else {       /* append */
+        tlen = slen + clen;
+        if (tlen > sizeof(tbuf)) return;    /* overflow, eat the char */
+        memcpy(tbuf, l->sbuf, slen);        /* copy sbuf to tbuf */
+        if (cbuf && clen > 0) memcpy(&tbuf[slen],cbuf,clen);
+        tbuf[tlen] = '\0';
     }
  
-    tlen = slen + clen;
     if (tlen > 0) {
-        if (tlen > sizeof(tbuf))            /* overflow, eat the char */
-            return;
-        memcpy(tbuf, l->sbuf, slen);        /* copy sbuf to tbuf */
-        memcpy(&tbuf[slen],cbuf,clen);
-        tbuf[tlen] = '\0';
-
-        if ((tpos = linenoiseHistorySearch(l, tbuf)) != -1) {
+        if (clen == 0) next = 1;
+        if ((tpos = linenoiseHistorySearch(l, tbuf, next)) != -1) {
             strcpy(l->sbuf, tbuf);          /* succ, copy tbuf to sbuf */
             strcpy(l->buf, history[tpos]);  /* copy history to buf */
             l->len = strlen(l->buf);
@@ -1026,7 +1037,7 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
     l.history_index = 0;
 
     l.search = 0;
-    l.sstep = 0;
+    l.sstep = -1;
     l.sbuf[0] = '\0';
 
     /* Buffer starts empty. */
@@ -1058,7 +1069,7 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             if (c == 0) continue;
         }
 
-	/* keep searching */
+	    /* keep searching */
         if (l.search) {
             if (!iscntrl(c)) {
                 linenoiseSearchAdd(&l,cbuf,nread);
@@ -1071,12 +1082,10 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
                 continue;
             case CTRL_R:
                 l.search = -1;
-                l.sstep -= 1;
                 linenoiseSearchAdd(&l,NULL,0);
                 continue;
             case CTRL_S:
                 l.search = 1;
-                l.sstep += 1;
                 linenoiseSearchAdd(&l,NULL,0);
                 continue;
             case BACKSPACE:
